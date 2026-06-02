@@ -296,5 +296,5 @@ r     12.578064   11.051764   12.750582
 ## Author
 
 Adapted by Javier Emmanuel Anguiano Pita  
-SECIHTI – Universidad de Guadalajara
+SECIHTI – Universidad de Guadalajara <br>
 Based on Otero & Smith (2021) and their accompanying Stata implementation.
