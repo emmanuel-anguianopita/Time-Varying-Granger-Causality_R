@@ -7,7 +7,8 @@ authors:
     orcid: https://orcid.org/0000-0002-3902-534X
 version: 1.0.0
 date-released: 2025-06-02
-url: https://github.com/emmanuel-anguianopita/Time-Varying-Granger-Causality_R/
+doi: 10.5281/zenodo.20517154
+url: https://doi.org/10.5281/zenodo.20517154
 references:
   - type: article
     authors:
