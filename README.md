@@ -112,6 +112,9 @@ res_2  <- tvgc(data_2, p = 2, d = 1, boot = 499, seed = 42)
 
 ## Usage
 
+📄 For a fully documented worked example, see [`example_money_income.R`](example_money_income.R) in this repository. The script replicates the money–income causality analysis of Shi, Hurn & Phillips (2020) and walks through every step: data preparation, parameter selection, result interpretation, plotting, and bidirectional causality testing.
+
+
 ```r
 # 1. Prepare data — numeric matrix only, NO date column
 #    Column 1 = dependent variable (Y)
