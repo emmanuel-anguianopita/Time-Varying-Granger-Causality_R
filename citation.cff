@@ -1,0 +1,23 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it."
+title: "tvgc: Time-Varying Granger Causality Test in R"
+authors:
+  - family-names: Anguiano Pita
+    given-names: Javier Emmanuel
+    orcid: https://orcid.org/XXXX-XXXX-XXXX-XXXX
+version: 1.0.0
+date-released: 2025-06-02
+url: https://github.com/tu-usuario/tvgc
+references:
+  - type: article
+    authors:
+      - family-names: Shi
+        given-names: Shuping
+      - family-names: Hurn
+        given-names: Stan
+      - family-names: Phillips
+        given-names: Peter C. B.
+    title: "Causal change detection in possibly integrated systems"
+    journal: Journal of Financial Econometrics
+    year: 2020
+    doi: 10.1093/jjfinec/nbz004
