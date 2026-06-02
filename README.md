@@ -2,6 +2,8 @@
 
 R implementation of the **time-varying Granger causality (TVGC) test** proposed by Otero & Smith (2021), based on the lag-augmented VAR framework of Toda & Yamamoto (1995) and Dolado & Lütkepohl (1996).
 
+---
+
 ## Background
 
 Standard Granger causality tests assume a fixed causal structure throughout the sample. This is often implausible in macroeconomic and financial data subject to structural breaks, policy changes, or crisis episodes.
@@ -60,24 +62,51 @@ source("tvgc.R")
 
 ## Input data
 
-`tvgc()` expects a **numeric matrix** as its first argument. Two rules apply before calling the function:
+`tvgc()` expects a **numeric matrix** as its first argument. Three rules apply before calling the function:
 
 1. **No date column.** If your data.frame has a date or index column, remove it first. Dates cause `as.matrix()` to coerce the entire object to `character`, which breaks all internal matrix operations. Pass the date vector separately to `tvgc_plot()` via the `dates` argument.
 
 2. **Coerce to `as.matrix()`.** The function calls `as.matrix()` and `storage.mode(data) <- "double"` internally, but it is good practice to pass a clean numeric matrix explicitly to avoid unexpected type coercions.
 
+3. **Column 1 is the dependent variable (Y).** The function tests whether each of columns 2 through K Granger-causes column 1. Column 1 itself never appears as a candidate cause and will not show up in the results or plots.
+
 ```r
-# Correct
-dates_vec <- df$date                            # 1. save dates separately
-data_mat  <- as.matrix(df[, c("Y", "X1", "X2")])  # 2. numeric columns only
-res       <- tvgc(data_mat, ...)
+# Correct — li is the dependent variable; lm1, lp, r are tested as causes
+dates_vec  <- df$date
+data_mat   <- data |> select(li, lm1, lp, r) |> as.matrix()
+res        <- tvgc(data_mat, ...)
 tvgc_plot(res, dates = dates_vec)
 
 # Wrong — will error
 res <- tvgc(df)                                 # date column included
 ```
 
-Column order matters: **column 1 is always the dependent variable** (Y); columns 2 through K are the RHS variables whose Granger-causal role is tested.
+### What the results contain
+
+After running `tvgc()`, `rownames(res$stats)` returns only the **RHS variables** (columns 2:K), never the dependent variable:
+
+```r
+data_mat <- data |> select(li, lm1, lp, r) |> as.matrix()
+res      <- tvgc(data_mat, ...)
+
+rownames(res$stats)
+#> [1] "lm1" "lp" "r"
+#
+# Each row answers: does this variable Granger-cause li?
+# li itself is not listed because it is the dependent variable, not a cause.
+```
+
+To test causality in **both directions** (e.g. does `li` cause `lm1` AND does `lm1` cause `li`), run the function twice with the variable order swapped:
+
+```r
+# Direction 1: do lm1, lp, r cause li?
+data_1 <- data |> select(li, lm1, lp, r) |> as.matrix()
+res_1  <- tvgc(data_1, p = 2, d = 1, boot = 499, seed = 42)
+
+# Direction 2: do li, lp, r cause lm1?
+data_2 <- data |> select(lm1, li, lp, r) |> as.matrix()
+res_2  <- tvgc(data_2, p = 2, d = 1, boot = 499, seed = 42)
+```
 
 ---
 
@@ -193,7 +222,6 @@ X       8.412       7.934       9.107
 
 ## Author
 
-Adapted by Javier Emmanuel Anguiano Pita  
+Adapted by J. E. Anguiano Pita  
 SECIHTI – Universidad de Guadalajara (CUCEA / DEEC)  
 Based on Otero & Smith (2021) and their accompanying Stata implementation.
-
