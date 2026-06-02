@@ -8,7 +8,7 @@ R implementation of the **time-varying Granger causality (TVGC) test** proposed 
 
 Standard Granger causality tests assume a fixed causal structure throughout the sample. This is often implausible in macroeconomic and financial data subject to structural breaks, policy changes, or crisis episodes.
 
-**Shi, Hurn & Phillips (2020)** introduced the three window-based algorithms implemented here — forward recursive (FE), rolling window (RO), and recursive evolving (RE) — as data-driven methods for detecting change points in causal relationships within a lag-augmented VAR framework. The paper derives the limit distributions for the subsample Wald statistics and develops bootstrap methods to control family-wise size across the recursive testing algorithms. Simulation evidence in that paper suggests that the recursive evolving algorithm provides the most reliable results, followed by the rolling window method.
+**Shi, Hurn & Phillips (2020)** introduced the three window-based algorithms implemented here — forward expanding (FE), rolling window (RW), and recursive evolving (RE) — as data-driven methods for detecting change points in causal relationships within a lag-augmented VAR framework. The paper derives the limit distributions for the subsample Wald statistics and develops bootstrap methods to control family-wise size across the recursive testing algorithms. Simulation evidence in that paper suggests that the recursive evolving algorithm provides the most reliable results, followed by the rolling window method.
 
 **Otero & Smith (2021)** extend this framework to heterogeneous panel settings and provide a companion Stata implementation. This R code adapts that Stata implementation to a single time-series setting, with several extensions (see [Adaptation notes](#adaptation-notes)).
 
@@ -36,9 +36,9 @@ Following Shi, Hurn & Phillips (2020), the test computes a Wald statistic for ea
 
 | Scheme | Abbreviation | Description |
 |---|---|---|
-| Forward-Expanding | FE | Start fixed at $t = 1$, end grows from $t + w - 1$ to $T$ |
-| Rolling | RO | Fixed-width window of size `window` slides across the sample |
-| Recursive-Expanding | RE | For each end-point $tt$, maximum Wald over all starts $t \leq tt$ |
+| Forward Expanding Window | `FE` | Start fixed at $t = 1$, end grows from $t + w - 1$ to $T$ |
+| Rolling Window | `RW` | Fixed-width window of size `window` slides across the sample |
+| Recursive Evolving Window | `RE` | For each end-point $tt$, maximum Wald over all starts $t \leq tt$ |
 
 Rejection of H₀ in any window indicates an **episode** of Granger causality. The time path of the statistic (see `tvgc_plot()`) reveals *when* causality appears or disappears.
 
@@ -133,8 +133,8 @@ res <- tvgc(
   cores       = 1L      # parallel workers (Mac/Linux only)
 )
 
-# 3. Plot
-tvgc_plot(res, dates = dates_vec, pct = 95)
+# 3. Plot — all variables, all window schemes
+plots <- tvgc_plot(res, dates = dates_vec, pct = 95)
 ```
 
 ### Parallel execution (Mac / Linux)
@@ -145,6 +145,72 @@ res <- tvgc(data_mat, p = 2, d = 1, boot = 499, seed = 42,
 ```
 
 > **Windows**: `parallel::mclapply` is fork-based and not available on Windows. The function falls back to sequential execution automatically and prints a message.
+
+---
+
+## Plotting with `tvgc_plot()`
+
+`tvgc_plot()` visualises the time path of the Wald statistic for each RHS variable and window scheme. Each plot shows:
+
+- A **filled area** (blue) for the Wald statistic over time.
+- An **orange line** for the bootstrap critical value at the chosen significance level.
+- **Grey shaded bands** marking periods where the Wald statistic exceeds the critical value — i.e. episodes of rejection of H₀ (evidence of Granger causality).
+
+Each combination of variable × window scheme is saved as a **separate named object** in the returned list.
+
+### Arguments
+
+| Argument | Default | Description |
+|---|---|---|
+| `res` | — | Object returned by `tvgc()`. |
+| `dates` | `NULL` | `Date` vector of length equal to `nrow(data)`. **Do not include in `tvgc()`** — pass here for x-axis labels only. If `NULL`, integer indices are used. |
+| `pct` | `95` | Significance level for the bootstrap critical value line: `90`, `95`, or `99`. |
+| `vars` | `NULL` | RHS variables to plot. Character vector of names (e.g. `"lm1"`) or integer index. `NULL` plots all. |
+| `schemes` | `c("FE","RW","RE")` | Window schemes to plot. Any subset of `"FE"` (Forward Expanding), `"RW"` (Rolling Window), `"RE"` (Recursive Evolving). |
+
+### Naming convention
+
+Returned plots are named `"<variable>_<scheme>"`:
+
+```r
+plots <- tvgc_plot(res, dates = dates_vec, pct = 95)
+
+plots$lm1_FE   # Forward Expanding Window — does lm1 Granger-cause Y?
+plots$lm1_RW   # Rolling Window
+plots$lm1_RE   # Recursive Evolving Window
+plots$lp_FE
+plots$r_RE
+# ...
+```
+
+### Selecting variables and schemes
+
+```r
+# One variable, all schemes
+tvgc_plot(res, dates = dates_vec, pct = 95, vars = "lm1")
+
+# All variables, rolling window only
+tvgc_plot(res, dates = dates_vec, pct = 95, schemes = "RW")
+
+# One variable, two schemes
+tvgc_plot(res, dates = dates_vec, pct = 95, vars = "lm1", schemes = c("FE", "RE"))
+
+# Save a specific plot
+ggplot2::ggsave("lm1_RE.pdf", plots$lm1_RE, width = 8, height = 5)
+```
+
+### Note on `dates`
+
+`dates` must be a vector of length `T` (the full sample), **not** `Nt = T - window + 1`. The function shifts the index internally to align each Wald statistic with the **end date** of its window. Passing a pre-trimmed vector will produce a misaligned x-axis.
+
+```r
+# Correct
+dates_vec <- as.Date(df$date)          # length T
+tvgc_plot(res, dates = dates_vec)
+
+# Wrong — x-axis will be misaligned
+tvgc_plot(res, dates = dates_vec[-(1:wwid)])   # do not trim
+```
 
 ---
 
@@ -171,10 +237,10 @@ res <- tvgc(data_mat, p = 2, d = 1, boot = 499, seed = 42,
 
 | Element | Description |
 |---|---|
-| `stats` | (K−1) × 3 matrix of test statistics (`Max_Wald_FE`, `Max_Wald_RO`, `Max_Wald_RE`) |
-| `cv90`, `cv95`, `cv99` | (K−1) × 3 matrices of bootstrap critical values |
-| `mats` | List of (K−1) Nt × Nt Wald-statistic matrices (full surface) |
-| `p`, `d`, `window`, `boot`, `sizecontrol` | Parameters used |
+| `stats` | (K−1) × 3 matrix of maximum Wald statistics, columns: `Max_Wald_FE`, `Max_Wald_RO`, `Max_Wald_RE`. Rows = RHS variables. |
+| `cv90`, `cv95`, `cv99` | (K−1) × 3 matrices of bootstrap critical values, same layout as `stats`. |
+| `mats` | Named list of (K−1) elements (one per RHS variable). Each element is a list with three numeric vectors of length `Nt = T - window + 1`: `$FE`, `$RO`, `$RE`. These are the raw Wald series used by `tvgc_plot()`. |
+| `p`, `d`, `window`, `boot`, `sizecontrol` | Parameters used in the run. |
 
 ---
 
@@ -210,24 +276,18 @@ Time-varying LA-VAR Granger causality test
 H0: Y is NOT Granger-caused
 
 Test statistics:
-
-   Max_Wald_FE Max_Wald_RO Max_Wald_RE
-lm1    8.680759    26.26639    26.26639
-lp    12.288680    14.87708    26.66078
-r      7.936891    48.09570    51.62437
+  Max_Wald_FE Max_Wald_RO Max_Wald_RE
+X      12.341       9.876      14.203
 
 95th percentile critical values [499 bootstrap replications]:
-
-   Max_Wald_FE Max_Wald_RO Max_Wald_RE
-lm1   10.977718   12.300516   12.602930
-lp     6.609465    7.478081    8.928484
-r     12.578064   11.051764   12.750582
+  Max_Wald_FE Max_Wald_RO Max_Wald_RE
+X       8.412       7.934       9.107
 ```
 
 ---
 
 ## Author
 
-Adapted by Javier Emmanuel Anguiano Pita
+Adapted by J. E. Anguiano Pita  
 SECIHTI – Universidad de Guadalajara (CUCEA / DEEC)  
 Based on Otero & Smith (2021) and their accompanying Stata implementation.
