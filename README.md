@@ -210,18 +210,24 @@ Time-varying LA-VAR Granger causality test
 H0: Y is NOT Granger-caused
 
 Test statistics:
-  Max_Wald_FE Max_Wald_RO Max_Wald_RE
-X      12.341       9.876      14.203
+
+   Max_Wald_FE Max_Wald_RO Max_Wald_RE
+lm1    8.680759    26.26639    26.26639
+lp    12.288680    14.87708    26.66078
+r      7.936891    48.09570    51.62437
 
 95th percentile critical values [499 bootstrap replications]:
-  Max_Wald_FE Max_Wald_RO Max_Wald_RE
-X       8.412       7.934       9.107
+
+   Max_Wald_FE Max_Wald_RO Max_Wald_RE
+lm1   10.977718   12.300516   12.602930
+lp     6.609465    7.478081    8.928484
+r     12.578064   11.051764   12.750582
 ```
 
 ---
 
 ## Author
 
-Adapted by J. E. Anguiano Pita  
+Adapted by Javier Emmanuel Anguiano Pita
 SECIHTI – Universidad de Guadalajara (CUCEA / DEEC)  
 Based on Otero & Smith (2021) and their accompanying Stata implementation.
