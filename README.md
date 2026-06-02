@@ -1,6 +1,6 @@
 # tvgc — Time-Varying Granger Causality Test in R
 
-R implementation of the **time-varying Granger causality (TVGC) test** proposed by Otero & Smith (2021), based on the lag-augmented VAR framework of Toda & Yamamoto (1995) and Dolado & Lütkepohl (1996).
+R implementation of the **time-varying Granger causality (TVGC) test** proposed by Shi, Hurn & Phillips (2020), based on the lag-augmented VAR framework of Toda & Yamamoto (1995) and Dolado & Lütkepohl (1996).
 
 ---
 
