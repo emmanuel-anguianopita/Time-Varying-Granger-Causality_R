@@ -298,3 +298,5 @@ r     12.578064   11.051764   12.750582
 Adapted by Javier Emmanuel Anguiano Pita  
 SECIHTI – Universidad de Guadalajara <br>
 Based on Otero & Smith (2021) and their accompanying Stata implementation.
+
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.20517154.svg)](https://doi.org/10.5281/zenodo.20517154)
