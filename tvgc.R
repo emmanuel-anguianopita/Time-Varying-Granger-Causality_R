@@ -144,7 +144,19 @@
 #'   Use \code{boot >= 499} for publication.
 #' @param seed
 #'   Integer random seed passed to \code{set.seed()} before the bootstrap
-#'   (optional). Set for reproducibility.
+#'   (default \code{123}, matching the Otero & Smith (2021) Stata implementation).
+#'   Setting a seed ensures that bootstrap critical
+#'   values are exactly reproducible across runs.
+#'
+#'   \strong{Note on replication of Shi, Hurn & Phillips (2020):} the original
+#'   paper was implemented in Matlab and does not report a random seed.
+#'   Because Matlab and R use different random number generators, bootstrap
+#'   critical values from this function will differ numerically from those in
+#'   the paper even with identical data and settings. This is expected and does
+#'   not indicate an error: the Wald statistics (which are deterministic) should
+#'   match, and conclusions are stable across seeds when \code{boot >= 499}.
+#'   To verify robustness, run the function with several different seeds and
+#'   confirm that the rejection episodes remain consistent.
 #' @param sizecontrol
 #'   Size-control parameter (integer, default \code{12}). Controls the
 #'   sub-sample length used in the bootstrap: bootstrap window width is
@@ -157,6 +169,20 @@
 #' @param robust
 #'   Logical. If \code{TRUE}, heteroskedasticity-consistent (HC / sandwich)
 #'   standard errors are used for the Wald statistic (default \code{FALSE}).
+#' @param hc_type
+#'   Character. HC variance estimator to use when \code{robust = TRUE}.
+#'   One of \code{"HC0"}, \code{"HC1"}, \code{"HC2"}, \code{"HC3"}
+#'   (default \code{"HC3"}).
+#'   \describe{
+#'     \item{HC0}{White (1980) sandwich — no finite-sample correction.
+#'       May underestimate variance in small windows.}
+#'     \item{HC1}{HC0 scaled by \eqn{n/(n-k)}. Minimal df correction.}
+#'     \item{HC2}{Divides squared residuals by \eqn{1 - h_{ii}}
+#'       (hat-matrix diagonal). Moderate-sample correction.}
+#'     \item{HC3}{Divides squared residuals by \eqn{(1 - h_{ii})^2}.
+#'       Recommended for small sub-samples (rolling/recursive windows);
+#'       closest to the standard used in the VAR bootstrap literature.}
+#'   }
 #' @param cores
 #'   Number of parallel workers (integer, default \code{1} = sequential).
 #'   Uses \code{parallel::mclapply} (fork-based). On Windows this argument is
@@ -227,8 +253,8 @@
 #' @seealso \code{\link{tvgc_plot}}
 #' @export
 # =============================================================================
-tvgc <- function(data, p = 2, d = 1, window = NULL, boot = 199, seed = NULL,
-                 sizecontrol = 12, trend = FALSE, robust = FALSE, cores = 1L) {
+tvgc <- function(data, p = 2, d = 1, window = NULL, boot = 199, seed = 123L,
+                 sizecontrol = 12, trend = FALSE, robust = FALSE, hc_type = "HC3", cores = 1L) {
   
   data    <- as.matrix(data)
   storage.mode(data) <- "double"   # ensure numeric; prevents crossprod() type errors
@@ -243,7 +269,13 @@ tvgc <- function(data, p = 2, d = 1, window = NULL, boot = 199, seed = NULL,
   
   if (lag_start + wwid + sc - 1L > Tobs)
     stop("initial window + sizecontrol exceeds available observations")
+  # Seed is always set for reproducibility (default = 42).
+  # The original Shi, Hurn & Phillips (2020) paper did not report a seed
+  # and was coded in Matlab, so critical values will differ numerically
+  # from those in the paper regardless of seed choice.
   if (!is.null(seed)) set.seed(seed)
+  
+  hc_type <- match.arg(toupper(hc_type), c("HC0", "HC1", "HC2", "HC3"))
   
   # ---------- parallel setup ------------------------------------------------
   # parallel::mclapply uses process forking and is unavailable on Windows.
@@ -303,7 +335,7 @@ tvgc <- function(data, p = 2, d = 1, window = NULL, boot = 199, seed = NULL,
   #
   # Returns a length-K vector; W[1] is unused, W[j] is the statistic for
   # H0: variable j does not Granger-cause variable 1.
-  .wstat <- function(Y, Xf, use_robust = FALSE) {
+  .wstat <- function(Y, Xf, use_robust = FALSE, hc = "HC3") {
     ok  <- complete.cases(Y, Xf)
     Y   <- Y[ok, , drop = FALSE]
     Xf  <- Xf[ok, , drop = FALSE]
@@ -318,11 +350,19 @@ tvgc <- function(data, p = 2, d = 1, window = NULL, boot = 199, seed = NULL,
     b  <- drop(XpXi %*% crossprod(Xf, y))
     e2 <- drop(y - Xf %*% b)^2
     
-    # Variance estimator: homoskedastic OLS or HC sandwich
+    # Variance estimator: homoskedastic OLS or HC0/HC1/HC2/HC3 sandwich
     om <- if (!use_robust) {
       (sum(e2) / n) * XpXi
     } else {
-      XpXi %*% (t(Xf) %*% (Xf * e2)) %*% XpXi
+      # Hat-matrix diagonal (leverage) needed for HC2 and HC3
+      h  <- if (hc %in% c("HC2", "HC3")) rowSums((Xf %*% XpXi) * Xf) else NULL
+      e2_adj <- switch(hc,
+                       HC0 = e2,
+                       HC1 = e2 * (n / (n - nb)),
+                       HC2 = e2 / pmax(1 - h, 1e-10),
+                       HC3 = e2 / pmax((1 - h)^2, 1e-10)
+      )
+      XpXi %*% (t(Xf) %*% (Xf * e2_adj)) %*% XpXi
     }
     om <- (om + t(om)) / 2   # symmetrise to guard against floating-point drift
     
@@ -356,25 +396,40 @@ tvgc <- function(data, p = 2, d = 1, window = NULL, boot = 199, seed = NULL,
   # Progress bar runs only in sequential mode (forked workers cannot share
   # the parent's stdout cleanly).
   
-  Nt   <- Tobs - wwid + 1L
-  mats <- lapply(seq_len(K - 1L), function(i) matrix(NA_real_, Nt, Nt))
-  names(mats) <- nms[-1L]   # name each element after its RHS variable
+  # Grid layout:
+  #   Valid start points : lag_start .. (Tobs - wwid + 1)  -> Nt_row rows
+  #   Valid end points   : (lag_start + wwid - 1) .. Tobs  -> Nt_col cols
+  #   row t -> actual start = lag_start + t - 1
+  #   col c -> actual end   = lag_start + wwid + c - 2
+  #
+  # This ensures each row uses a DISTINCT start point, so FE (row 1) and RE
+  # (col max over rows 1..c) are genuinely different: FE fixes start = lag_start
+  # while RE searches over all valid starts <= end - wwid + 1.
+  
+  Nt_row <- Tobs - wwid - lag_start + 2L
+  Nt_col <- Nt_row
+  Nt     <- Nt_col
+  
+  mats <- lapply(seq_len(K - 1L), function(i) matrix(NA_real_, Nt_row, Nt_col))
+  names(mats) <- nms[-1L]
   
   cat("\nStage 1/2 — Computing Wald statistics\n")
   if (n_cores == 1L)
-    pb_test <- utils::txtProgressBar(min = 0, max = Nt, style = 3, width = 50)
+    pb_test <- utils::txtProgressBar(min = 0, max = Nt_row, style = 3, width = 50)
   
-  row_results <- .lapply(seq_len(Nt), function(t) {
+  row_results <- .lapply(seq_len(Nt_row), function(t) {
+    t_actual <- lag_start + t - 1L          # actual start index in data
     row_vals <- vector("list", K - 1L)
-    for (i in seq_len(K - 1L)) row_vals[[i]] <- rep(NA_real_, Nt)
-    for (tt in (t + wwid - 1L):Tobs) {
-      idx <- t:tt
-      idx <- idx[idx >= lag_start]
+    for (i in seq_len(K - 1L)) row_vals[[i]] <- rep(NA_real_, Nt_col)
+    
+    for (tt in (t_actual + wwid - 1L):Tobs) {
+      idx <- t_actual:tt
       if (length(idx) < p + 2L) next
       W   <- .wstat(data[idx, , drop = FALSE], .buildX(Xl, Zl, idx),
-                    use_robust = robust)
-      col <- tt - wwid + 1L
-      for (i in 2L:K) row_vals[[i - 1L]][col] <- W[i]
+                    use_robust = robust, hc = hc_type)
+      col <- tt - (lag_start + wwid - 2L)   # column index (1-based)
+      if (col >= 1L && col <= Nt_col)
+        for (i in 2L:K) row_vals[[i - 1L]][col] <- W[i]
     }
     if (n_cores == 1L) utils::setTxtProgressBar(pb_test, t)
     row_vals
@@ -382,7 +437,7 @@ tvgc <- function(data, p = 2, d = 1, window = NULL, boot = 199, seed = NULL,
   
   if (n_cores == 1L) close(pb_test)
   
-  for (t in seq_len(Nt))
+  for (t in seq_len(Nt_row))
     for (i in seq_len(K - 1L))
       mats[[i]][t, ] <- row_results[[t]][[i]]
   
@@ -397,10 +452,11 @@ tvgc <- function(data, p = 2, d = 1, window = NULL, boot = 199, seed = NULL,
   # Access example: res$mats$MXN$FE, res$mats$MXN$RO, res$mats$MXN$RE
   
   mats <- lapply(mats, function(m) {
-    fe <- m[1L, ]
-    ro <- diag(m)
-    re <- sapply(seq_len(Nt), function(col) {
-      vals <- m[seq_len(col), col]
+    fe <- m[1L, ]      # FE: start fixed at lag_start (row 1), end grows
+    ro <- diag(m)      # RO: diagonal — end - start + 1 = wwid exactly
+    re <- sapply(seq_len(Nt_col), function(col) {
+      # RE: for each end-point, sup over all valid start points (rows 1..col)
+      vals <- m[seq_len(min(col, Nt_row)), col]
       if (all(is.na(vals))) NA_real_ else max(vals, na.rm = TRUE)
     })
     list(FE = fe, RO = ro, RE = re)
@@ -522,7 +578,15 @@ tvgc <- function(data, p = 2, d = 1, window = NULL, boot = 199, seed = NULL,
           omb <- if (!robust) {
             (sum(e2b) / nb) * XpXi_b
           } else {
-            XpXi_b %*% (t(Xfb2) %*% (Xfb2 * e2b)) %*% XpXi_b
+            hb  <- if (hc_type %in% c("HC2", "HC3"))
+              rowSums((Xfb2 %*% XpXi_b) * Xfb2) else NULL
+            e2b_adj <- switch(hc_type,
+                              HC0 = e2b,
+                              HC1 = e2b * (nb / (nb - ncol(Xfb2))),
+                              HC2 = e2b / pmax(1 - hb, 1e-10),
+                              HC3 = e2b / pmax((1 - hb)^2, 1e-10)
+            )
+            XpXi_b %*% (t(Xfb2) %*% (Xfb2 * e2b_adj)) %*% XpXi_b
           }
           omb <- (omb + t(omb)) / 2
           
@@ -598,7 +662,8 @@ tvgc <- function(data, p = 2, d = 1, window = NULL, boot = 199, seed = NULL,
     cv90        = cv90,  cv95 = cv95,  cv99 = cv99,
     mats        = mats,
     p           = p,     d    = d,     window = wwid,
-    boot        = bootrepl,            sizecontrol = sc
+    boot        = bootrepl,            sizecontrol = sc,
+    lag_start   = lag_start
   ))
 }
 
@@ -607,16 +672,16 @@ tvgc <- function(data, p = 2, d = 1, window = NULL, boot = 199, seed = NULL,
 #' Plot Time-Varying Granger Causality Results
 #'
 #' @description
-#' Produces one faceted ggplot per RHS variable, showing the time path of the
-#' Wald statistic for each of the three window schemes (Forward-Expanding,
-#' Rolling, Recursive-Expanding) alongside the bootstrap critical value
-#' threshold. Periods where the statistic exceeds the dashed threshold indicate
-#' rejection of the null hypothesis of Granger non-causality.
+#' Produces one ggplot per RHS variable per window scheme (FE, RO, RE),
+#' following the style of area + critical-value line + shaded rejection periods.
+#' Periods where the Wald statistic exceeds the bootstrap critical value are
+#' highlighted with a grey shaded band. Each plot is stored as a separate
+#' named object in the returned list.
 #'
 #' @param res
 #'   Object returned by \code{\link{tvgc}}.
 #' @param dates
-#'   Optional vector of dates or labels of length equal to \code{nrow(data)}
+#'   Optional \code{Date} vector of length equal to \code{nrow(data)}
 #'   (the original sample size passed to \code{tvgc()}). Used to label the
 #'   x-axis. If \code{NULL} (default), integer observation indices are used.
 #'   \strong{Note}: dates must not be included in the \code{data} argument
@@ -624,10 +689,16 @@ tvgc <- function(data, p = 2, d = 1, window = NULL, boot = 199, seed = NULL,
 #' @param pct
 #'   Which bootstrap critical value to overlay: \code{90}, \code{95}
 #'   (default), or \code{99}.
+#' @param vars
+#'   Which RHS variables to plot. Character vector of variable names
+#'   (e.g. \code{vars = "MXN"}) or integer index vector (e.g. \code{vars = 1}).
+#'   \code{NULL} (default) plots all RHS variables. All three window schemes
+#'   (FE, RW, RE) are always plotted for each selected variable.
 #'
 #' @return
-#' Invisibly, a named list of \code{ggplot} objects, one per RHS variable.
-#' Each plot is also printed to the active graphics device.
+#' Invisibly, a named list of \code{ggplot} objects. Each element is named
+#' \code{"<var>_<scheme>"}, e.g. \code{plots$lm1_FE}, \code{plots$lm1_RW},
+#' \code{plots$lm1_RE}. Each plot is also printed to the active graphics device.
 #'
 #' @references
 #' Otero, J. & Smith, J. (2021). Testing for Granger non-causality in
@@ -636,17 +707,28 @@ tvgc <- function(data, p = 2, d = 1, window = NULL, boot = 199, seed = NULL,
 #'
 #' @examples
 #' \dontrun{
-#' res   <- tvgc(data_mat, p = 2, d = 1, boot = 199, seed = 42)
+#' res   <- tvgc(data_mat, p = 2, d = 1, boot = 199, seed = 123)
 #' dates <- seq(as.Date("2000-01-03"), by = "day", length.out = nrow(data_mat))
+#'
+#' # Plot all variables — all three schemes (FE, RW, RE) are always shown
 #' plots <- tvgc_plot(res, dates = dates, pct = 95)
-#' # Save a specific panel:
-#' ggplot2::ggsave("tvgc_X.pdf", plots[["X"]], width = 8, height = 6)
+#'
+#' # Access individual plots by variable and scheme
+#' plots$lm1_FE   # Forward Expanding Window
+#' plots$lm1_RW   # Rolling Window
+#' plots$lm1_RE   # Recursive Evolving Window
+#'
+#' # Plot only one variable (still produces three plots: FE, RW, RE)
+#' tvgc_plot(res, dates = dates, pct = 95, vars = "lm1")
+#'
+#' # Save a specific plot
+#' ggplot2::ggsave("lm1_RE.pdf", plots$lm1_RE, width = 8, height = 5)
 #' }
 #'
 #' @seealso \code{\link{tvgc}}
 #' @export
 # =============================================================================
-tvgc_plot <- function(res, dates = NULL, pct = 95) {
+tvgc_plot <- function(res, dates = NULL, pct = 95, vars = NULL) {
   if (!requireNamespace("ggplot2", quietly = TRUE))
     stop("Please install ggplot2: install.packages('ggplot2')")
   
@@ -654,27 +736,206 @@ tvgc_plot <- function(res, dates = NULL, pct = 95) {
   if (!cv_key %in% names(res))
     stop("pct must be 90, 95, or 99")
   
-  cv_mat <- res[[cv_key]]
-  mats   <- res$mats
-  wwid   <- res$window
-  xnames <- rownames(res$stats)
-  K1     <- length(xnames)
   
-  types   <- c("Forward expanding", "Rolling", "Recursive expanding")
-  col_map <- c("Forward expanding"   = "#2166ac",
-               "Rolling"             = "#d6604d",
-               "Recursive expanding" = "#4dac26")
+  cv_mat  <- res[[cv_key]]
+  mats    <- res$mats
+  wwid    <- res$window
+  xnames  <- rownames(res$stats)
+  depname <- attr(res$stats, "depname")
   
-  plots <- vector("list", K1)
+  # --- variable selection ---------------------------------------------------
+  if (is.null(vars)) {
+    idx_plot <- seq_along(xnames)
+  } else if (is.numeric(vars)) {
+    idx_plot <- as.integer(vars)
+    bad <- idx_plot[idx_plot < 1L | idx_plot > length(xnames)]
+    if (length(bad))
+      stop(sprintf("vars index out of range: %s. Available: 1-%d.",
+                   paste(bad, collapse = ", "), length(xnames)))
+  } else {
+    idx_plot <- match(vars, xnames)
+    missing  <- vars[is.na(idx_plot)]
+    if (length(missing))
+      stop(sprintf("Variable(s) not found in results: %s. Available: %s.",
+                   paste(missing, collapse = ", "),
+                   paste(xnames,  collapse = ", ")))
+  }
   
-  for (i in seq_len(K1)) {
-    fe <- mats[[i]]$FE
-    ro <- mats[[i]]$RO
-    re <- mats[[i]]$RE
-    Nt <- length(fe)
+  cv_label   <- sprintf("Bootstrap critical value (%d%%)", pct)
+  scheme_labels <- c(FE = "Forward Expanding Window",
+                     RW = "Rolling Window",   # user-facing key
+                     RO = "Rolling Window",   # internal key (kept for safety)
+                     RE = "Recursive Evolving Window")
+  
+  plots <- list()
+  
+  # --- helper: build one plot -----------------------------------------------
+  .one_plot <- function(wald_vec, cv_val, x_vals, titulo) {
     
-    # x-axis: end-of-window observation index
-    x_idx <- seq_len(Nt) + wwid - 1L
+    # Keep only finite Wald values; cv is a scalar — add as separate data frame
+    # to avoid the "rows removed" warning from NA wald values
+    df_wald <- data.frame(
+      Date = x_vals,
+      wald = wald_vec
+    )
+    df_wald <- df_wald[is.finite(df_wald$wald), ]
+    
+    # Critical value data frame: spans the same x range as the Wald series
+    df_cv <- data.frame(
+      Date = df_wald$Date,
+      cv   = if (is.finite(cv_val)) cv_val else NA_real_
+    )
+    
+    if (nrow(df_wald) == 0) {
+      warning("No finite Wald statistics to plot.")
+      return(NULL)
+    }
+    
+    # ---- Shaded rejection periods -------------------------------------------
+    df_wald$rechazo  <- is.finite(cv_val) & (df_wald$wald > cv_val)
+    fechas_bloque    <- df_wald[df_wald$rechazo, ]
+    
+    if (nrow(fechas_bloque) > 0 && inherits(x_vals, "Date")) {
+      gaps  <- c(TRUE, diff(fechas_bloque$Date) > 31)
+      grupo <- cumsum(gaps)
+      periodos <- data.frame(
+        inicio = as.Date(tapply(as.integer(fechas_bloque$Date), grupo, min),
+                         origin = "1970-01-01"),
+        fin    = as.Date(tapply(as.integer(fechas_bloque$Date), grupo, max),
+                         origin = "1970-01-01")
+      )
+    } else if (nrow(fechas_bloque) > 0) {
+      gaps  <- c(TRUE, diff(fechas_bloque$Date) > 1)
+      grupo <- cumsum(gaps)
+      periodos <- data.frame(
+        inicio = tapply(fechas_bloque$Date, grupo, min),
+        fin    = tapply(fechas_bloque$Date, grupo, max)
+      )
+    } else {
+      periodos <- data.frame(inicio = NA, fin = NA)[0, ]
+    }
+    
+    # ---- Y-axis: 4-6 ticks --------------------------------------------------
+    # Include cv in max_y so the critical value line is never clipped
+    max_y <- max(c(df_wald$wald, cv_val), na.rm = TRUE)
+    if (!is.finite(max_y) || max_y == 0) max_y <- 5
+    
+    .pick_step <- function(mx) {
+      candidates <- c(100, 50, 25, 20, 15, 10, 5, 2.5, 2, 1, 0.5)
+      for (s in candidates) {
+        upper    <- ceiling(mx / s) * s
+        n_breaks <- length(seq(s, upper, by = s))
+        if (n_breaks >= 4 && n_breaks <= 6)
+          return(list(step = s, upper = upper))
+      }
+      s <- ceiling(mx / 4); if (s == 0) s <- 1
+      list(step = s, upper = ceiling(mx / s) * s)
+    }
+    
+    y_params    <- .pick_step(max_y)
+    y_step      <- y_params$step
+    upper_limit <- y_params$upper
+    
+    # ---- Legend position: avoid top-right if Wald is high there -------------
+    # Compare mean Wald in the right 30% of the series vs left 70%
+    n_obs    <- nrow(df_wald)
+    cutoff   <- floor(0.70 * n_obs)
+    mean_right <- if (cutoff < n_obs)
+      mean(df_wald$wald[(cutoff + 1):n_obs], na.rm = TRUE) else 0
+    mean_left  <- if (cutoff > 0)
+      mean(df_wald$wald[1:cutoff], na.rm = TRUE) else 0
+    
+    # Place legend in the corner with the lower average Wald
+    if (mean_right <= mean_left) {
+      leg_pos  <- c(0.97, 0.97)   # top-right
+      leg_just <- c("right", "top")
+    } else {
+      leg_pos  <- c(0.03, 0.97)   # top-left
+      leg_just <- c("left", "top")
+    }
+    
+    # ---- Build plot ---------------------------------------------------------
+    p <- ggplot2::ggplot(df_wald, ggplot2::aes(x = Date)) +
+      {
+        if (nrow(periodos) > 0)
+          ggplot2::geom_rect(
+            data = periodos,
+            ggplot2::aes(xmin = inicio, xmax = fin,
+                         ymin = -Inf,   ymax = Inf,
+                         fill = "Rejection of H0"),
+            alpha = 0.5, inherit.aes = FALSE
+          )
+      } +
+      ggplot2::geom_area(
+        ggplot2::aes(y = wald, fill = "Wald statistic"),
+        color = "#004C73", alpha = 0.8
+      ) +
+      # Critical value drawn from its own data frame to avoid row-removal warnings
+      ggplot2::geom_line(
+        data     = df_cv,
+        ggplot2::aes(x = Date, y = cv, color = cv_label),
+        linewidth = 1.2,
+        na.rm     = TRUE
+      ) +
+      ggplot2::scale_fill_manual(
+        name   = NULL,
+        values = c("Wald statistic"  = "#006699",
+                   "Rejection of H0" = "grey80")
+      ) +
+      ggplot2::scale_color_manual(
+        name   = NULL,
+        values = setNames("darkorange", cv_label)
+      ) +
+      ggplot2::labs(title = titulo, x = "Year", y = "Wald statistic") +
+      ggplot2::scale_y_continuous(
+        limits = c(0, upper_limit),
+        breaks = seq(y_step, upper_limit, by = y_step),
+        expand = ggplot2::expansion(mult = c(0, 0.05))
+      ) +
+      ggplot2::theme_minimal(base_size = 14) +
+      ggplot2::theme(
+        panel.background     = ggplot2::element_rect(fill  = "white"),
+        panel.border         = ggplot2::element_rect(color = "black",
+                                                     fill  = NA,
+                                                     linewidth = 1),
+        axis.line            = ggplot2::element_line(color = "black",
+                                                     linewidth = 0.8),
+        panel.grid.major     = ggplot2::element_line(color = "grey95",
+                                                     linewidth = 0.2),
+        panel.grid.minor     = ggplot2::element_line(color = "grey98",
+                                                     linewidth = 0.1),
+        plot.title           = ggplot2::element_text(face = "bold", size = 18),
+        legend.position      = leg_pos,
+        legend.justification = leg_just,
+        legend.background    = ggplot2::element_rect(fill  = "white",
+                                                     color = NA),
+        legend.margin        = ggplot2::margin(2, 6, 2, 2),
+        legend.text          = ggplot2::element_text(size = 9),
+        legend.key.size      = ggplot2::unit(0.4, "cm")
+      )
+    
+    # Add date x-axis only when dates are Date objects
+    if (inherits(x_vals, "Date")) {
+      p <- p + ggplot2::scale_x_date(
+        limits      = c(min(df_wald$Date, na.rm = TRUE),
+                        max(df_wald$Date, na.rm = TRUE)),
+        date_breaks = "4 years",
+        date_labels = "%Y",
+        expand      = c(0, 0)
+      )
+    }
+    
+    p
+  }
+  # --------------------------------------------------------------------------
+  
+  for (ii in seq_along(idx_plot)) {
+    i  <- idx_plot[ii]
+    vn <- xnames[i]
+    
+    # x_idx: actual end-point observation index for each column
+    # end = lag_start + wwid - 2 + col
+    x_idx <- (res$lag_start + wwid - 2L) + seq_len(length(mats[[i]]$FE))
     if (!is.null(dates)) {
       if (length(dates) < max(x_idx))
         stop("'dates' is shorter than the series length")
@@ -683,37 +944,26 @@ tvgc_plot <- function(res, dates = NULL, pct = 95) {
       x_vals <- x_idx
     }
     
-    df <- data.frame(
-      x    = rep(x_vals, 3L),
-      stat = c(fe, ro, re),
-      type = factor(rep(types, each = Nt), levels = types),
-      cv   = rep(c(cv_mat[i, 1L], cv_mat[i, 2L], cv_mat[i, 3L]), each = Nt)
+    # User-facing key is RW; internal mats key is RO
+    scheme_series <- list(
+      FE = list(wald = mats[[i]]$FE, cv = cv_mat[i, 1L]),
+      RW = list(wald = mats[[i]]$RO, cv = cv_mat[i, 2L]),
+      RE = list(wald = mats[[i]]$RE, cv = cv_mat[i, 3L])
     )
-    df <- df[is.finite(df$stat), ]
     
-    p <- ggplot2::ggplot(df, ggplot2::aes(x = x, y = stat, colour = type)) +
-      ggplot2::geom_line(linewidth = 0.7) +
-      ggplot2::geom_line(ggplot2::aes(y = cv, colour = type),
-                         linetype = "dashed", linewidth = 0.5) +
-      ggplot2::scale_colour_manual(values = col_map, name = NULL) +
-      ggplot2::facet_wrap(~type, ncol = 1L, scales = "free_y") +
-      ggplot2::labs(
-        title    = sprintf("TVGC: %s Granger-causes %s?",
-                           xnames[i], attr(res$stats, "depname")),
-        subtitle = sprintf("Dashed line = %dth pct bootstrap critical value", pct),
-        x        = NULL,
-        y        = "Wald statistic"
-      ) +
-      ggplot2::theme_bw(base_size = 11) +
-      ggplot2::theme(
-        legend.position  = "none",
-        strip.background = ggplot2::element_rect(fill = "grey92"),
-        panel.grid.minor = ggplot2::element_blank()
+    for (scheme in c("FE", "RW", "RE")) {
+      titulo <- sprintf("%s: Does %s Granger-cause %s?",
+                        scheme_labels[[scheme]], vn, depname)
+      p <- .one_plot(
+        wald_vec = scheme_series[[scheme]]$wald,
+        cv_val   = scheme_series[[scheme]]$cv,
+        x_vals   = x_vals,
+        titulo   = titulo
       )
-    
-    print(p)
-    plots[[i]] <- p
-    names(plots)[i] <- xnames[i]
+      key        <- paste0(vn, "_", scheme)
+      plots[[key]] <- p
+      print(p)
+    }
   }
   
   invisible(plots)
