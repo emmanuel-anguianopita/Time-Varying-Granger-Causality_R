@@ -113,9 +113,6 @@ res_2  <- tvgc(data_2, p = 2, d = 1, boot = 499, seed = 42)
 
 ## Usage
 
-📄 For a fully documented worked example, see [`example_money_income.R`](example_money_income.R) in this repository. The script replicates the money–income causality analysis of Shi, Hurn & Phillips (2020) and walks through every step: data preparation, parameter selection, result interpretation, plotting, and bidirectional causality testing.
-
-
 ```r
 # 1. Prepare data — numeric matrix only, NO date column
 #    Column 1 = dependent variable (Y)
@@ -169,8 +166,7 @@ Each combination of variable × window scheme is saved as a **separate named obj
 | `res` | — | Object returned by `tvgc()`. |
 | `dates` | `NULL` | `Date` vector of length equal to `nrow(data)`. **Do not include in `tvgc()`** — pass here for x-axis labels only. If `NULL`, integer indices are used. |
 | `pct` | `95` | Significance level for the bootstrap critical value line: `90`, `95`, or `99`. |
-| `vars` | `NULL` | RHS variables to plot. Character vector of names (e.g. `"lm1"`) or integer index. `NULL` plots all. |
-| `schemes` | `c("FE","RW","RE")` | Window schemes to plot. Any subset of `"FE"` (Forward Expanding), `"RW"` (Rolling Window), `"RE"` (Recursive Evolving). |
+| `vars` | `NULL` | RHS variables to plot. Character vector of names (e.g. `"lm1"`) or integer index. `NULL` plots all. All three window schemes (FE, RW, RE) are always plotted for each selected variable. |
 
 ### Naming convention
 
@@ -187,17 +183,19 @@ plots$r_RE
 # ...
 ```
 
-### Selecting variables and schemes
+### Selecting variables
+
+All three window schemes (FE, RW, RE) are always plotted. Use `vars` to restrict which RHS variables are shown:
 
 ```r
-# One variable, all schemes
+# One variable — produces three plots: lm1_FE, lm1_RW, lm1_RE
 tvgc_plot(res, dates = dates_vec, pct = 95, vars = "lm1")
 
-# All variables, rolling window only
-tvgc_plot(res, dates = dates_vec, pct = 95, schemes = "RW")
+# Two variables — produces six plots
+tvgc_plot(res, dates = dates_vec, pct = 95, vars = c("lm1", "lp"))
 
-# One variable, two schemes
-tvgc_plot(res, dates = dates_vec, pct = 95, vars = "lm1", schemes = c("FE", "RE"))
+# All variables (default) — produces 3 × K plots
+tvgc_plot(res, dates = dates_vec, pct = 95)
 
 # Save a specific plot
 ggplot2::ggsave("lm1_RE.pdf", plots$lm1_RE, width = 8, height = 5)
@@ -227,7 +225,7 @@ tvgc_plot(res, dates = dates_vec[-(1:wwid)])   # do not trim
 | `d` | `1` | Integration order for Toda–Yamamoto augmentation. Use `d = 0` for stationary data. |
 | `window` | `floor(0.2 * T)` | Minimum window width in observations. |
 | `boot` | `199` | Bootstrap replications. Use ≥ 499 for publication. |
-| `seed` | `NULL` | Random seed for reproducibility. |
+| `seed` | `123` | Random seed for reproducibility. Matches the `seed(123)` used in the Otero & Smith (2021) Stata implementation. Pass `NULL` to disable. |
 | `sizecontrol` | `12` | Bootstrap size-control parameter (bootstrap window = `sizecontrol * 6`). |
 | `trend` | `FALSE` | Include a linear trend in the VAR. |
 | `robust` | `FALSE` | Use HC (sandwich) standard errors. |
@@ -245,6 +243,36 @@ tvgc_plot(res, dates = dates_vec[-(1:wwid)])   # do not trim
 | `cv90`, `cv95`, `cv99` | (K−1) × 3 matrices of bootstrap critical values, same layout as `stats`. |
 | `mats` | Named list of (K−1) elements (one per RHS variable). Each element is a list with three numeric vectors of length `Nt = T - window + 1`: `$FE`, `$RO`, `$RE`. These are the raw Wald series used by `tvgc_plot()`. |
 | `p`, `d`, `window`, `boot`, `sizecontrol` | Parameters used in the run. |
+
+---
+
+## Reproducibility and the original paper
+
+Bootstrap critical values depend on the random number generator used. This has two implications:
+
+**Within this implementation:** the default `seed = 123` — matching the `seed(123)` used in the Otero & Smith (2021) Stata code — guarantees that two users running `tvgc()` with the same data and parameters will obtain **identical results**. To change the seed, pass any integer (e.g. `seed = 42`). To disable the seed and get a different draw each run, pass `seed = NULL`.
+
+**Versus the original Shi, Hurn & Phillips (2020) paper:** the paper was implemented in **Matlab** and does **not report a random seed**. Because Matlab and R use different random number generators, bootstrap critical values from this function will differ numerically from those in the paper even with identical data and settings. This is expected and does not indicate an error.
+
+What *should* match are the **Wald statistics**, which are deterministic (no randomness involved). If your `res$stats` values are close to the maxima visible in Figure 2 of the paper, the implementation is correct.
+
+To verify that your conclusions are robust to the choice of seed, run:
+
+```r
+seeds <- c(123, 42, 456, 789, 2024)
+
+cv_check <- sapply(seeds, function(s) {
+  res <- tvgc(final_data, p = 2, d = 1, trend = TRUE,
+              window = 72, sizecontrol = 60,
+              boot = 499, seed = s,
+              robust = TRUE, hc_type = "HC0")
+  res$cv95["lm1", ]
+})
+
+round(cv_check, 3)   # critical values should be stable across seeds
+```
+
+If the Wald statistic consistently exceeds the critical value across all seeds, the conclusion is robust regardless of which seed the original authors used.
 
 ---
 
