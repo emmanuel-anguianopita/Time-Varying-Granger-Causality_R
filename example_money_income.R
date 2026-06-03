@@ -42,7 +42,7 @@ source("tvgc.R")
 # 1. Load and prepare data
 # -----------------------------------------------------------------------------
 
-data <- readRDS("../Data/money-income-data.rmd")
+data <- readRDS("../Data/money-income-data.rds")
 
 # Select only the four variables needed for this analysis.
 # Column order matters:
@@ -103,7 +103,8 @@ tvgc_1 <- tvgc(
   trend       = TRUE,
   window      = 72,
   sizecontrol = 60,
-  boot        = 199,
+  boot        = 499,
+  seed        = 123,
   robust      = TRUE
 )
 
@@ -152,47 +153,60 @@ length(date) == nrow(final_data)   # must be TRUE
 # --- Plot selected variables and schemes ------------------------------------
 #
 # vars    : subset of RHS variables to plot. NULL = all.
-# schemes : any subset of "FE" (Forward Expanding), "RW" (Rolling Window),
-#           "RE" (Recursive Evolving). NULL / omitted = all three.
+# All three window schemes (FE, RW, RE) are always plotted automatically.
+# Use `vars` to restrict which RHS variables are shown.
 #
-# Each combination of variable x scheme produces one plot, stored as a
-# named element in the returned list: plots$lm1_FE, plots$lp_RW, etc.
+# Each variable x scheme produces one named plot in the returned list:
+#   plots$lm1_FE   — Forward Expanding Window
+#   plots$lm1_RW   — Rolling Window
+#   plots$lm1_RE   — Recursive Evolving Window
 #
 # The plot shows:
-#   - Blue area       : Wald statistic over time
-#   - Orange line     : bootstrap critical value at the chosen level (pct)
-#   - Grey shading    : periods where Wald > critical value (rejection of H0,
-#                       i.e. evidence of Granger causality at that point in time)
+#   - Blue area    : Wald statistic over time
+#   - Orange line  : bootstrap critical value at the chosen level (pct)
+#   - Grey shading : periods where Wald > critical value (rejection of H0,
+#                    i.e. evidence of Granger causality at that point in time)
+
+# --- Plot selected variables (all three schemes each) -----------------------
 
 plots <- tvgc_plot(
-  res     = tvgc_1,
-  dates   = date,
-  pct     = 95,           # 95% bootstrap critical value
-  vars    = c("lm1", "lp"),   # plot only M1 and price level
-  schemes = "FE"          # forward expanding window only
+  res   = tvgc_1,
+  dates = date,
+  pct   = 95,                  # 95% bootstrap critical value
+  vars  = c("lm1", "lp")      # M1 and price level — 6 plots total
 )
 
 # Access individual plots
 plots$lm1_FE    # Does M1 Granger-cause income? — Forward Expanding
-plots$lp_FE     # Does price level Granger-cause income? — Forward Expanding
+plots$lm1_RW    # Does M1 Granger-cause income? — Rolling Window
+plots$lm1_RE    # Does M1 Granger-cause income? — Recursive Evolving
+plots$lp_FE
+plots$lp_RW
+plots$lp_RE
 
-# --- Plot all variables and all schemes -------------------------------------
+# --- Plot all variables (3 variables x 3 schemes = 9 plots) ----------------
 
 plots_all <- tvgc_plot(tvgc_1, dates = date, pct = 95)
 
 plots_all$lm1_FE
 plots_all$lm1_RW
 plots_all$lm1_RE
+plots_all$lp_FE
+plots_all$lp_RW
+plots_all$lp_RE
+plots_all$r_FE
+plots_all$r_RW
 plots_all$r_RE
 
 # --- Save plots to disk -----------------------------------------------------
 
 ggplot2::ggsave("lm1_FE.pdf", plots$lm1_FE, width = 8, height = 5)
-ggplot2::ggsave("lp_FE.pdf",  plots$lp_FE,  width = 8, height = 5)
+ggplot2::ggsave("lm1_RW.pdf", plots$lm1_RW, width = 8, height = 5)
+ggplot2::ggsave("lm1_RE.pdf", plots$lm1_RE, width = 8, height = 5)
 
 
 # -----------------------------------------------------------------------------
-# 5. Testing causality in both directions
+# 6. Testing causality in both directions
 # -----------------------------------------------------------------------------
 #
 # The specification above tests: do lm1, lp, r cause li?
@@ -218,4 +232,4 @@ tvgc_2 <- tvgc(
 # Does li Granger-cause lm1?
 tvgc_2$stats
 plots_rev <- tvgc_plot(tvgc_2, dates = date, pct = 95,
-                       vars = "li", schemes = "FE")
+                       vars = "li")   # produces li_FE, li_RW, li_RE
